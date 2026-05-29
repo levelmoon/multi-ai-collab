@@ -1,33 +1,31 @@
 #!/bin/bash
-# R event detector. Runs on E's host. Emits one stdout line per meaningful
-# event so R's harness can wake on it instead of polling on a timer.
+# R 端事件监听器。跑在 E 主机上,每次有意义的事发生就 emit 一行 stdout,
+# R 的 harness 接事件唤醒,而不是定时轮询。
 #
-# Events emitted:
-#   R_WATCH_START <time> baseline_head=<sha>
-#   COMMIT_NEW <oneline>          when git HEAD moves
-#   QUESTION_FILE <path>          when step-*-question.md first appears
-#   HALT_FLAG                     when handoff/.halt first appears
-#   E_IDLE no new probe <N>s      when nothing new for IDLE_TIMEOUT_SEC
+# 会 emit 的事件:
+#   R_WATCH_START <时间> baseline_head=<sha>
+#   COMMIT_NEW <oneline>          —— git HEAD 移动
+#   QUESTION_FILE <path>          —— step-*-question.md 首次出现
+#   HALT_FLAG                     —— handoff/.halt 首次出现
+#   E_IDLE no new activity <N>s   —— IDLE_TIMEOUT_SEC 内没新东西
 #
-# Configure the two paths at the top to your project, drop to /tmp/, then
-# wire R-side as:
+# 改顶上两行路径成你项目的,丢到 /tmp/,R 端这么接:
 #   while true; do
 #     ssh -o ServerAliveInterval=30 user@E_HOST "bash /tmp/r_watch.sh" 2>&1
 #     echo "SSH_DROPPED reconnecting"; sleep 5
 #   done
 #
-# Each non-noise stdout line becomes a wake-up event in R's harness.
-# Heartbeat is written to /tmp/r_heartbeat every loop so the human can
-# verify the watcher is alive: cat /tmp/r_heartbeat
+# 每行非噪声 stdout 都变成 R harness 的一次唤醒。
+# 心跳写到 /tmp/r_heartbeat 每轮更新,人可以随时 cat 一眼确认监听还活着。
 
 set -u
 
-# === EDIT THESE TWO ===
+# === 改这两行 ===
 WORKSPACE=${WORKSPACE:-/path/to/your/workspace}
-LOG_DIR=${LOG_DIR:-$WORKSPACE/logs}   # whichever dir E drops fresh artifacts in
-# ======================
+LOG_DIR=${LOG_DIR:-$WORKSPACE/logs}   # 你项目里 E 持续产出新东西的目录
+# ================
 
-IDLE_TIMEOUT_SEC=${IDLE_TIMEOUT_SEC:-1200}   # 20 min
+IDLE_TIMEOUT_SEC=${IDLE_TIMEOUT_SEC:-1200}   # 20 分钟
 LOOP_SLEEP_SEC=${LOOP_SLEEP_SEC:-30}
 
 HANDOFF="$WORKSPACE/handoff"
@@ -46,14 +44,14 @@ echo "R_WATCH_START $(date +%H:%M:%S) baseline_head=$LAST_HEAD"
 while true; do
   echo "R-monitor alive $(date +%H:%M:%S) pid=$$" > /tmp/r_heartbeat 2>/dev/null
 
-  # New commit?
+  # 新 commit?
   HEAD=$(git log --oneline -1 2>/dev/null)
   if [ -n "$HEAD" ] && [ "$HEAD" != "$LAST_HEAD" ]; then
     LAST_HEAD="$HEAD"
     echo "COMMIT_NEW $HEAD"
   fi
 
-  # Question file appeared? (dedupe — emit once per appearance)
+  # question 文件出现?(去重,只在首次出现时报一次)
   Q=$(ls "$HANDOFF"/step-*-question.md 2>/dev/null | head -1)
   if [ -n "$Q" ]; then
     [ "$Q_SEEN" -eq 0 ] && { Q_SEEN=1; echo "QUESTION_FILE $Q"; }
@@ -61,14 +59,14 @@ while true; do
     Q_SEEN=0
   fi
 
-  # Halt flag appeared? (dedupe)
+  # halt 标志出现?(去重)
   if [ -f "$HANDOFF/.halt" ]; then
     [ "$HALT_SEEN" -eq 0 ] && { HALT_SEEN=1; echo "HALT_FLAG"; }
   else
     HALT_SEEN=0
   fi
 
-  # New activity in LOG_DIR, or extended idle?
+  # LOG_DIR 有新活动? 或长时间无活动?
   NEWP=$(ls -t "$LOG_DIR" 2>/dev/null | head -1)
   NOW=$(date +%s)
   if [ "$NEWP" != "$LAST_PROBE" ]; then

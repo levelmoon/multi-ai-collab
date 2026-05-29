@@ -1,129 +1,97 @@
-# Lessons learned
+# 踩坑总结(9 条)
 
-Nine patterns and mistakes from the 4-day refactor this template was extracted
-from. Skim before you start — most of them cost real time when ignored.
+这是 4 天重构里**真金白银学到**的 9 条,跳过任何一条都会再坑你一次。动手前过一遍。
 
-## 1. Use base64 for writes that cross encoding layers
+## 1. 跨编码层写文件必须 base64
 
-Writing UTF-8 markdown from your IDE assistant through PowerShell, then through
-SSH, then through bash is a tour through every encoding bug ever filed.
-Chinese characters become `?`, emoji become mojibake, parentheses break quoting.
+从 IDE 里的 AI 助手把 UTF-8 markdown 经 PowerShell → SSH → bash 写到远端,
+是一趟"所有编码 bug 全踩一遍"的旅程:中文变 `?`、emoji 变乱码、括号把引号吞掉。
 
-Reliable pattern:
+可靠模式:
 
 ```powershell
 $content = @'
-multi-line UTF-8 content with whatever characters
+含中文 / emoji / 反引号 / 各种字符的多行 UTF-8 内容
 '@
 $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($content))
 ssh user@host "echo $b64 | base64 -d > /target/path"
 ```
 
-You won't believe how much time this saves until you don't use it for the
-first hundred files.
+不用这个模式之前你不会信它有多重要,被坑到第 100 个文件就信了。
 
-## 2. Agent self-loops are not as autonomous as they look
+## 2. Agent 自循环远没看上去那么自动
 
-Most "agent in a chat panel" UIs (Codex, Cursor, VS Code Claude) don't truly
-loop indefinitely between turns. They finish a batch and stop, waiting for
-user input. The `FOR_E.md` mailbox + the user occasionally relaying nudges is
-what keeps the loop *practically* going. Don't design as if the agent will
-self-resume forever — design for "one batch then stop", and let the next
-batch start fresh by re-reading the standing docs.
+绝大多数"对话面板里的 agent"(Codex / Cursor / VS Code Claude)**不会真的无限循环**。
+干完一批就停,等你输入。`FOR_E.md` 邮箱 + 偶尔人工转达就是让循环**实际能继续**的胶水。
 
-## 3. Event-driven beats timer-driven
+不要按"agent 会自己永远跑下去"来设计,要按"干一批就停、下一批从头读常驻文档"来设计。
 
-A fixed `wake every N minutes` timer in R's harness tends to fire when the
-user has switched away from R's window (the harness suspends the timer when
-the window isn't foreground). An SSH-tail watcher running as a child process
-keeps producing events even while the harness is backgrounded — the events
-queue and get delivered when R's window comes back.
+## 3. 事件驱动比定时轮询好
 
-The watcher also lets R *do nothing* when E is doing nothing, instead of
-waking up just to check and go back to sleep.
+R 端的"每 N 分钟唤醒一次"定时器,在你切走 R 窗口时大概率会被 harness 挂起(窗口不前台就停)。
+而 SSH-tail 监听跑在子进程里,即使 harness 后台,事件也会排队,等 R 窗口回来一并送达。
 
-## 4. Sim = real is non-negotiable
+监听还有个好处:**E 没动静时 R 也没动静**,不会"醒来看一眼又睡回去"白烧 token。
 
-The single most expensive bug we caught: E was about to pipe a simulation-
-only ground-truth signal into the runtime code path "just to make the
-dynamic-obstacle scenario pass." Catching that was the most valuable
-architectural call of the project.
+## 4. sim=real 是不可妥协的底线
 
-Rule: anything that's only available in simulation **does not exist** from
-the runtime code's perspective. If sim has an oracle the real system can't
-replicate, the planner / runtime / whatever's responsibility is to
-**degrade gracefully without it**, not to use it.
+我们 4 天里最贵的一次差点出错:E 想把仿真专属的真值信号(障碍速度)接到 runtime 代码,"只是为了让 dynamic 场景过"。R 挡下这一刀是整个项目最值钱的一次架构决策。
 
-This applies to obstacle velocities, ground truth poses, sim-only message
-fields, anything.
+规则:**仿真专属的东西,从 runtime 代码视角不存在**。如果仿真有一个真机复现不了的 oracle,
+runtime 的责任是"**没有它也能优雅降级**",不是"用它过门"。
 
-## 5. "Whack-a-mole" is a signal to step back, not patch faster
+这条覆盖:障碍速度、ground truth 位姿、仿真专属字段、任何"仿真给了真机给不了"的东西。
 
-When fixing one symptom keeps surfacing another, the symptoms share a
-root cause that the current architecture is masking. Three good prompts
-to stop and rethink:
+## 5. "打地鼠"是该停下来,不是修更快
 
-- "Each fix I do generates a new failure on a different scenario."
-- "I just added the third special case for X."
-- "The metric passes but the human reviewing the visualization still
-  doesn't like it."
+修一个症状又冒一个新症状,说明它们共享一个**根因**,而当前架构在掩盖它。三个该停下来反思的信号:
 
-In our case, the third one — the user looking at RViz and saying "this
-still feels wrong despite passing the tests" — was the trigger to
-discover a `yaw ↔ perception ↔ plan` feedback loop and a
-"per-frame recompute" jitter source. Fixing those instead of adding more
-cost terms is what finally produced smooth behavior.
+- "每修一个 bug 就在另一个场景里冒出新 bug。"
+- "我刚加了第三个 X 的特例分支。"
+- "数据过门,但人在可视化里看还是觉得不爽。"
 
-## 6. Measure what you actually want, not what's easy
+我们项目里第三个信号(用户看 RViz 说"指标过了但还是别扭")是触发架构层重审的关键——
+最后发现是 yaw↔感知↔plan 反馈环 + 每帧重算抖动。不是接着调 cost,而是治这两个根因,
+才真正出来了平滑行为。
 
-Acceptance tests measure what they measure. If you don't measure
-*smoothness*, *jitter*, *hesitation*, *yaw rate* — the agent will
-optimize for the metrics that exist and you'll end up with paths that
-pass acceptance but feel unstable.
+## 6. 度量你"真正在意"的事,而不是好度量的事
 
-Always check: "if I only saw the numbers in this report, would I
-conclude the behavior is good?" If not, the report needs new metrics,
-not just more tuning.
+验收门只覆盖你度量了的维度。如果你不度量**平滑性 / 抖动 / 犹豫 / yaw 角速度**,
+agent 就会优化它能看到的指标,最后拿到"过门但飞起来不稳"的结果。
 
-## 7. Hysteresis as soft bias > state machine as separate code paths
+每写一个 report 前自问:"如果只看报告里这些数,我会得出**这玩意行**的结论吗?"
+答案是否,**加新度量**,不是继续调参。
 
-We almost re-introduced a 4-state explicit mode machine to fix
-oscillation. The cleaner answer was a tiny `phase_` variable that only
-added cost biases to the unified scorer (not separate plan-generation
-code paths) and that drove re-plan triggers, not per-frame choices.
+## 7. 迟滞作软偏置 > 显式状态机分支
 
-Same hysteresis effect, far simpler implementation. State as a soft
-input to a unified scorer beats state as a control-flow fork every time.
+我们差点重新引入一个 4 状态显式 mode 机来治震荡。更干净的解是:
+一个小的 `phase_` 变量,**只在统一评分器里加 cost 偏置**(不是写独立 plan-gen 分支),
+并驱动重规划触发条件。
 
-## 8. Commit-and-follow beats recompute-every-frame
+效果一样的迟滞,实现复杂度差一个数量级。**状态作为统一评分器的软输入,远好于状态作为控制流分叉**。
 
-Re-planning from scratch every cycle on slightly changed inputs produces
-a slightly different plan every cycle — which feels like "jitter" to
-the human, even if every individual cycle is locally optimal.
+## 8. 承诺轨迹 > 每帧从头重算
 
-The architecture fix was to **commit** to a plan and only re-plan on
-bounded triggers (safety, deviation, externally-mandated change), not
-every cycle. This is also a perception-loop breaker: when the plan is
-stable, the things it implies (yaw, FOV, observed inputs) are stable,
-the next plan is stable. Stability becomes self-reinforcing instead of
-self-disturbing.
+每帧用稍变的输入从头重算,输出每帧都稍微不一样——人在可视化里看就是"抖"。
+即使每帧局部都最优,加起来也是不稳定。
 
-## 9. Production-Ready gates need margin
+架构层面的解:**承诺一条轨迹,只在有边界触发(安全 / 偏离 / 外部信号变化)时重规划**,
+不是每帧。
 
-If your hard safety threshold is `clearance ≥ 0.15`, set the
-Production-Ready gate at `≥ 0.20`. The extra 5cm pays for real-world
-localization drift, mechanical tolerance, environmental disturbance,
-and the difference between simulated and actual sensor noise.
+这同时是反馈环 breaker:轨迹稳了 → 它隐含的 yaw 稳了 → 相机方向稳了 → 感知稳了 → 下一帧 plan 还是稳的。
+**稳定性变成自我强化**而不是自我扰动。
 
-Same idea for any "performance" threshold (latency, throughput, error
-rate) — leave margin between the simulation gate and the real-world
-hard limit, because the real world is always noisier and busier than
-simulation.
+## 9. Production-Ready 验收门要留余量
 
-## Bonus: commit hygiene matters when other WIP is around
+如果你的安全硬门是"clearance ≥ 0.15",**Production-Ready 门设到 ≥ 0.20**。
+多出来这 0.05m 是给现实世界定位漂移、机械公差、风扰、真实传感器噪声(总比仿真大)留的余量。
 
-If the user is editing unrelated files in the same workspace (the case
-in our project — a file from a different subsystem was open in their
-IDE), `git add -A` will silently mix that WIP into your refactor commit.
-Always add specific files. Make this an explicit instruction in
-`EXECUTOR_LOOP.md`.
+性能阈值(延迟、吞吐、错误率)同理——仿真过的指标和实机硬门之间留 buffer,
+因为现实世界总比仿真又噪又忙。
+
+## 加餐:用户有 WIP 时 commit 卫生很重要
+
+如果用户同时在 workspace 里改别的子系统的文件(我们项目里就是另一个无关模块的 `.cpp`),
+`git add -A` 会**悄悄**把这些 WIP 混进你的重构 commit。
+
+永远精确 `git add <具体文件>`,把这条写进 `EXECUTOR_LOOP.md` 的硬约束。

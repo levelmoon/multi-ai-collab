@@ -1,91 +1,79 @@
 # multi-ai-collab
 
-Two AI agents collaborating on one codebase via a file-based mailbox: one
-**Reviewer/Architect (R)**, one **Executor (E)**. Drop the templates into a
-project's `handoff/` directory and launch each agent with a one-line prompt.
+两个 AI 通过**文件邮箱**协作做一件大事:一个 **Reviewer/Architect (R)** + 一个 **Executor (E)**。
+把模板丢进项目的 `handoff/` 目录,再各发一句启动 prompt,两边就能跑起来。
 
-Battle-tested on a 4-day drone path-planner refactor (2900 LOC, 11 sim
-scenarios, Production-Ready gate). The pattern + the gotchas in
-[`LESSONS.md`](LESSONS.md) are the durable take-aways.
+从一次 4 天的无人机局部路径规划重构里提炼出来的(2900 行代码、11 个仿真场景、Production-Ready 门全过)。
+真正值钱的是协作机制 + [`LESSONS.md`](LESSONS.md) 里的 9 条踩坑总结。
 
-## Setup (5 minutes)
+## 5 分钟接通
 
-1. **Copy `handoff/` into your project.**
+1. **把 `handoff/` 复制到你的项目**:
    ```bash
    cp -r handoff/ /path/to/your-project/
    ```
-2. **Fill in project-specific docs.** In your project's `handoff/` you now have
-   `PROTOCOL.md`, `EXECUTOR_LOOP.md`, `REVIEWER_LOOP.md`, `INDEX.md`. They are
-   generic. You should also add:
-   - `REQUIREMENTS.md` — the user's actual goals + safety rules + acceptance
-     thresholds. R keeps this current.
-   - `ARCHITECTURE.md` — project invariants and contracts with other systems.
-   - Append project-specific "never" rules to the bottom of `PROTOCOL.md`.
-3. **Drop the R-side event watcher on E's host.**
+2. **补两份项目专属文档**。`handoff/` 里现在有通用的 `PROTOCOL.md` / `EXECUTOR_LOOP.md` /
+   `REVIEWER_LOOP.md` / `INDEX.md`,你还需要加:
+   - `REQUIREMENTS.md` —— 用户的真实需求 + 安全边界 + 数值验收门(R 负责保持同步)
+   - `ARCHITECTURE.md` —— 项目不变量、与其他系统的契约、out-of-scope 边界
+   - 在 `PROTOCOL.md` 末尾加项目专属"红线"
+3. **把 R 端事件监听脚本丢到 E 主机**:
    ```bash
    scp scripts/r_watch.sh user@<E-HOST>:/tmp/
-   # edit WORKSPACE and LOG_DIR at the top to match your project
+   # 编辑顶上两行 WORKSPACE / LOG_DIR 改成你项目的路径
    ```
-4. **Launch E** in a fresh agent session (Codex, Cursor, etc.):
+4. **启动 E**(在 Codex / Cursor 等 agent 会话里):
    > 读 `<workspace>/handoff/PROTOCOL.md` 和 `EXECUTOR_LOOP.md`,你是 E,开始干。
-5. **Launch R** in your IDE assistant:
+5. **启动 R**(在你的 IDE assistant 里):
    > 读 `<workspace>/handoff/PROTOCOL.md` 和 `REVIEWER_LOOP.md`,我是 R。
 
-That's it. R will idle until E writes a report/question/halt; E will iterate
-through the steps polling `FOR_E.md` each cycle.
+之后 R 大部分时间待机,E 出报告/问题/halt 时被事件唤醒;E 在自己会话里循环干活,每轮先 cat `FOR_E.md`。
 
-## Repo layout
+## 仓库结构
 
 ```
 multi-ai-collab/
-├── README.md             ← you are here
-├── LESSONS.md            ← 9 gotchas worth reading before you start
+├── README.md             ← 你在这
+├── LESSONS.md            ← 9 条踩坑,动手前过一遍
 ├── LICENSE               ← MIT
-├── handoff/              ← copy this into your project
-│   ├── PROTOCOL.md       ← roles, files, blocking flow, FOR_E mailbox
-│   ├── EXECUTOR_LOOP.md  ← E's standing instructions (autonomous mode)
-│   ├── REVIEWER_LOOP.md  ← R's standing instructions
-│   └── INDEX.md          ← blank status tracker
+├── handoff/              ← 直接 cp 到你项目里
+│   ├── PROTOCOL.md       ← 角色 / 文件 / 阻塞流程 / FOR_E 邮箱
+│   ├── EXECUTOR_LOOP.md  ← E 的常驻指令(含自驱模式)
+│   ├── REVIEWER_LOOP.md  ← R 的常驻指令
+│   └── INDEX.md          ← 状态追踪模板(初始空)
 └── scripts/
-    └── r_watch.sh        ← R-side event watcher (runs on E's host)
+    └── r_watch.sh        ← R 端事件监听(跑在 E 主机上)
 ```
 
-## How it actually works
+## 机制怎么工作
 
-- **`handoff/`** is the only channel between R and E. Each file has a single
-  owner (R or E); see `PROTOCOL.md` for the table.
-- **R writes specs and reviews; E writes reports and questions.** R never
-  edits source code or runs git. E owns all git operations.
-- **`FOR_E.md`** is R's mid-task mailbox. E `cat`s it at the top of every
-  iteration, acts on anything found, then deletes it.
-- **Halt** = E writes `step-N-question.md` and `touch handoff/.halt` when
-  stuck. R answers, removes `.halt`, E resumes.
-- **`r_watch.sh`** runs on E's host and emits an event line each time
-  something meaningful happens (commit, question file appears, halt flag,
-  long idle). R's harness wakes on each line — no fixed-interval polling.
+- **`handoff/`** 是 R 和 E 之间**唯一通道**。每个文件只有一个所有者(见 `PROTOCOL.md`)。
+- **R 写 spec / review;E 写 report / question。** R 不动源码不 commit,E 独占 git 操作。
+- **`FOR_E.md`** 是 R 的中途邮箱。E 每轮迭代头部 `cat` 一次,有内容就处理 + 删掉。
+- **Halt 协议**:E 卡住时写 `step-N-question.md` + `touch handoff/.halt`,R 回答完清 halt,E 下次继续。
+- **`r_watch.sh`** 跑在 E 主机,发生有意义的事(commit / question / halt / 长时间 idle)就 emit 一行。
+  R 的 harness 接事件唤醒,不再定时轮询。
 
-## Customize per project
+## 项目专属定制点
 
-The mailbox mechanism is reusable as-is. Three files are project-specific:
+通用机制不动,**只有 3 处要按项目改**:
 
-| File | What you fill in |
+| 文件 | 你填什么 |
 |---|---|
-| `REQUIREMENTS.md` | The user's real goals, safety boundaries, numeric acceptance gates |
-| `ARCHITECTURE.md` | Project invariants, contracts with other components, out-of-scope boundaries |
-| `PROTOCOL.md` bottom section | Hard "never" rules specific to your domain |
+| `REQUIREMENTS.md` | 用户真实目标 + 安全红线 + 数值验收门 |
+| `ARCHITECTURE.md` | 项目不变量、对外接口契约、out-of-scope 边界 |
+| `PROTOCOL.md` 末尾"项目专属红线"段 | 你这个领域的硬"never"规则 |
 
-Everything else (`EXECUTOR_LOOP.md`, `REVIEWER_LOOP.md`, `INDEX.md`,
-`r_watch.sh`, the `FOR_E.md` convention, the question/halt protocol)
-generalizes.
+其他(`EXECUTOR_LOOP.md` / `REVIEWER_LOOP.md` / `INDEX.md` / `r_watch.sh` / FOR_E 邮箱约定 /
+question-halt 协议)都通用。
 
-## Before you start
+## 动手前先读
 
-Read [`LESSONS.md`](LESSONS.md). It's nine specific things that will bite
-you otherwise — base64 for UTF-8 over SSH, agents don't truly self-loop,
-event-driven vs timer-driven wakes, sim=real as a non-negotiable, when
-whack-a-mole means step back, measuring what you actually want, and a
-few more.
+[`LESSONS.md`](LESSONS.md) —— 9 条具体的坑,不读会再踩一遍:
+base64 跨编码层、agent 并不是真自循环、事件驱动 vs 定时轮询、sim=real 底线、
+打地鼠是该退一步而不是修更快、要度量你**真正在意**的事、迟滞作软偏置 vs 显式状态机、
+承诺架构 vs 每帧重算、Production-Ready 留余量。
 
 ## License
 
-MIT.
+MIT。
